@@ -338,6 +338,7 @@
                     <li>选择时间范围进行回测</li>
                     <li>点击"开始对比"查看收益曲线</li>
                     <li>支持港股市场，代码格式：HK + 数字</li>
+                    <li>📊 数据来源：Yahoo Finance（实时数据），如获取失败则使用模拟数据</li>
                 </ul>
             </div>
 
@@ -504,30 +505,103 @@
                 updateTotalWeight(portfolio);
             }
         });
+        // CORS 代理服务（用于绕过浏览器 CORS 限制）
+        const CORS_PROXY = 'https://api.allorigins.win/raw?url=';
+        
+        // Yahoo Finance API 基础 URL
+        const YAHOO_FINANCE_BASE = 'https://query1.finance.yahoo.com/v8/finance/chart/';
 
-        // 模拟获取股票数据（实际应用中需要连接真实API）
-        async function fetchStockData(stockCode, startDate, endDate) {
-            // 这里使用模拟数据，实际应用中应该调用真实的股票API
-            // 例如：Alpha Vantage, Yahoo Finance, 或香港交易所API
+        // 将港股代码转换为 Yahoo Finance 格式
+        function convertToYahooSymbol(stockCode) {
+            // 处理 HK 前缀的代码
+            if (stockCode.toUpperCase().startsWith('HK')) {
+                const numberPart = stockCode.substring(2);
+                return `${numberPart}.HK`;
+            }
+            // 如果已经是正确的格式，直接返回
+            if (stockCode.includes('.HK') || stockCode.includes('.SS') || stockCode.includes('.SZ')) {
+                return stockCode;
+            }
+            // 默认添加 .HK 后缀
+            return `${stockCode}.HK`;
+        }
+
+        // 从 Yahoo Finance 获取股票数据
+        async function fetchStockDataFromYahoo(symbol, startDate, endDate) {
+            const yahooSymbol = convertToYahooSymbol(symbol);
+            const startTimestamp = Math.floor(new Date(startDate).getTime() / 1000);
+            const endTimestamp = Math.floor(new Date(endDate).getTime() / 1000);
             
+            const url = `${YAHOO_FINANCE_BASE}${yahooSymbol}?period1=${startTimestamp}&period2=${endTimestamp}&interval=1d&includePreClose=false&range=1d&useYield=false`;
+            
+            try {
+                // 使用 CORS 代理
+                const response = await fetch(CORS_PROXY + encodeURIComponent(url));
+                
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                
+                const data = await response.json();
+                
+                if (!data.chart || !data.chart.result || data.chart.result.length === 0) {
+                    console.warn(`No data found for ${symbol}`);
+                    return [];
+                }
+                
+                const result = data.chart.result[0];
+                const timestamps = result.timestamp || [];
+                const quotes = result.indicators.quote[0] || {};
+                const closes = quotes.close || [];
+                
+                const stockData = [];
+                for (let i = 0; i < timestamps.length; i++) {
+                    if (closes[i] !== null && closes[i] !== undefined) {
+                        const date = new Date(timestamps[i] * 1000).toISOString().split('T')[0];
+                        stockData.push({
+                            date: date,
+                            price: closes[i],
+                            code: symbol
+                        });
+                    }
+                }
+                
+                return stockData;
+            } catch (error) {
+                console.error(`Error fetching data for ${symbol}:`, error);
+                // 降级到模拟数据
+                return generateMockData(symbol, startDate, endDate);
+            }
+        }
+
+        // 生成模拟数据（作为备用方案）
+        function generateMockData(stockCode, startDate, endDate) {
             const start = new Date(startDate);
             const end = new Date(endDate);
             const data = [];
             
-            // 生成模拟的股价数据
-            let basePrice = Math.random() * 100 + 50;
+            // 根据股票代码生成不同的基准价格
+            const hash = stockCode.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+            let basePrice = 50 + (hash % 100);
             const currentDate = new Date(start);
+            
+            // 使用确定性的随机种子
+            let seed = hash;
+            function pseudoRandom() {
+                seed = (seed * 9301 + 49297) % 233280;
+                return seed / 233280;
+            }
             
             while (currentDate <= end) {
                 // 跳过周末
                 if (currentDate.getDay() !== 0 && currentDate.getDay() !== 6) {
-                    // 随机波动 -5% 到 +5%
-                    const change = (Math.random() - 0.5) * 0.1;
+                    // 随机波动 -3% 到 +3%
+                    const change = (pseudoRandom() - 0.5) * 0.06;
                     basePrice = basePrice * (1 + change);
                     
                     data.push({
                         date: currentDate.toISOString().split('T')[0],
-                        price: basePrice,
+                        price: Math.max(basePrice, 1), // 确保价格为正
                         code: stockCode
                     });
                 }
@@ -535,6 +609,20 @@
             }
             
             return data;
+        }
+
+        // 获取股票数据（主函数）- 接入真实 API
+        async function fetchStockData(stockCode, startDate, endDate) {
+            // 首先尝试从 Yahoo Finance 获取真实数据
+            const realData = await fetchStockDataFromYahoo(stockCode, startDate, endDate);
+            
+            if (realData && realData.length > 0) {
+                return realData;
+            }
+            
+            // 如果真实数据获取失败，返回模拟数据
+            console.log(`Using mock data for ${stockCode}`);
+            return generateMockData(stockCode, startDate, endDate);
         }
 
         // 计算组合收益
